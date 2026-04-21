@@ -1,0 +1,9 @@
+[project]
+name = "ext4rescue"
+version = "0.1.0"
+description = "ext4 recovery tool for overwritten disks"
+requires-python = ">=3.11"
+dependencies = ["magika>=0.5.0"]
+
+[project.scripts]
+ext4rescue = "ext4rescue.cli:main"
