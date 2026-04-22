@@ -8,6 +8,7 @@ hunt-super     Scan the image for ext4 superblock candidates.
 recover-named  Filesystem-aware recovery: exports named files and orphans.
 carve          Fallback file carving pipeline.
 report         Generate an HTML report from a completed recovery session.
+ai-orphans     Generate AI suggestions for orphan organization from JSON input.
 
 All commands are read-only; the source disk/image is never modified.
 """
@@ -87,6 +88,21 @@ def main() -> None:
         help="Output HTML file (default: report.html).",
     )
 
+    # ai-orphans
+    p_ai = sub.add_parser(
+        "ai-orphans",
+        help="AI suggestions for orphan structure (JSON in/out).",
+    )
+    p_ai.add_argument("input_json", help="Input JSON containing an 'orphans' list.")
+    p_ai.add_argument("output_json", help="Output JSON with AI suggestions.")
+    p_ai.add_argument("--model", default="gpt-5", help="OpenAI model name.")
+    p_ai.add_argument(
+        "--threshold",
+        type=float,
+        default=0.80,
+        help="Confidence threshold for accepted suggestions (default: 0.80).",
+    )
+
     args = parser.parse_args()
 
     if args.cmd is None:
@@ -114,6 +130,8 @@ def _dispatch(args: argparse.Namespace) -> None:
         _cmd_carve(args)
     elif args.cmd == "report":
         _cmd_report(args)
+    elif args.cmd == "ai-orphans":
+        _cmd_ai_orphans(args)
 
 
 # ── detect-fs ─────────────────────────────────────────────────────────────────
@@ -254,3 +272,45 @@ def _cmd_report(args: argparse.Namespace) -> None:
 
     _print(f"Report written to: {out}")
 
+
+# ── ai-orphans ──────────────────────────────────────────────────────────────────
+
+def _cmd_ai_orphans(args: argparse.Namespace) -> None:
+    from .ai import OrphanRecord, OrphanRebuilder
+
+    try:
+        with open(args.input_json, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        _print_err(f"File not found: {args.input_json}")
+        sys.exit(1)
+    except PermissionError:
+        _print_err(f"Permission denied: {args.input_json}")
+        sys.exit(1)
+    except json.JSONDecodeError as exc:
+        _print_err(f"Invalid JSON in input file: {exc}")
+        sys.exit(1)
+
+    try:
+        raw_orphans = data["orphans"]
+        orphans = [OrphanRecord(**item) for item in raw_orphans]
+    except (KeyError, TypeError, ValueError) as exc:
+        _print_err(f"Invalid orphan input format: {exc}")
+        sys.exit(1)
+
+    try:
+        rebuilder = OrphanRebuilder(
+            model=args.model,
+            confidence_threshold=args.threshold,
+        )
+        result = rebuilder.suggest_structure(orphans)
+        with open(args.output_json, "w", encoding="utf-8") as f:
+            json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
+    except PermissionError:
+        _print_err(f"Permission denied writing output: {args.output_json}")
+        sys.exit(1)
+    except ValueError as exc:
+        _print_err(f"AI orphan suggestion error: {exc}")
+        sys.exit(1)
+
+    _print(f"AI orphan suggestions written to: {args.output_json}")
