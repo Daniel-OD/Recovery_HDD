@@ -27,7 +27,6 @@ JSON_SCHEMA: dict[str, Any] = {
         "next_steps",
         "operator_notes",
     ],
-    "additionalProperties": False,
 }
 
 

@@ -12,7 +12,7 @@ def _write_json(path, payload) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_ai_journal_rejects_more_than_max_items(tmp_path: pytest.TempPathFactory) -> None:
+def test_ai_journal_rejects_more_than_max_items(tmp_path) -> None:
     input_path = tmp_path / "in.json"
     output_path = tmp_path / "out.json"
     payload = {"items": [{"inode_nr": i} for i in range(301)]}

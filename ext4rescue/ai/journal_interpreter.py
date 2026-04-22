@@ -21,13 +21,11 @@ JSON_SCHEMA: dict[str, Any] = {
                     "confidence": {"type": "number"},
                 },
                 "required": ["inode_nr", "candidate_name", "confidence"],
-                "additionalProperties": False,
             },
         },
         "notes": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["events", "notes"],
-    "additionalProperties": False,
 }
 
 
