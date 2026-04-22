@@ -5,8 +5,29 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
-SYSTEM_PROMPT = "Journal interpretation assistant. Be conservative. Return JSON."
-DEFAULT_MAX_ITEMS = 300
+try:
+    from openai import OpenAI
+except ImportError as exc:  # pragma: no cover
+    raise RuntimeError(
+        "Missing dependency: openai. Install with `pip install openai`."
+    ) from exc
+
+
+SYSTEM_PROMPT = """\
+You are a digital forensics assistant analyzing ext4 jbd2 journal mining results.
+Your job:
+- Interpret journal-derived candidate file name events conservatively.
+- Correlate inode numbers, transaction sequences, timestamps, and directory-entry fragments.
+- Identify likely file rename/delete/create patterns.
+- Never claim certainty when evidence is partial.
+- Return structured JSON only.
+Rules:
+- jbd2 is noisy and incomplete; be conservative.
+- Prefer 'candidate' language over certainty.
+- Preserve original extensions if present.
+- If evidence is weak, return low confidence and explain why.
+"""
+
 
 JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -18,13 +39,33 @@ JSON_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "inode_nr": {"type": "integer"},
                     "candidate_name": {"type": "string"},
+                    "candidate_parent": {"type": "string"},
+                    "sequence": {"type": "integer"},
+                    "commit_ts": {"type": "integer"},
+                    "event_type": {
+                        "type": "string",
+                        "enum": ["create", "delete", "rename", "link", "unknown"],
+                    },
                     "confidence": {"type": "number"},
+                    "reason": {"type": "string"},
                 },
-                "required": ["inode_nr", "candidate_name", "confidence"],
+                "required": [
+                    "inode_nr",
+                    "candidate_name",
+                    "candidate_parent",
+                    "sequence",
+                    "commit_ts",
+                    "event_type",
+                    "confidence",
+                    "reason",
+                ],
                 "additionalProperties": False,
             },
         },
-        "notes": {"type": "array", "items": {"type": "string"}},
+        "notes": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
     },
     "required": ["events", "notes"],
     "additionalProperties": False,
@@ -43,12 +84,20 @@ class JournalCandidate:
     record_type: str | None = None
     confidence_hint: float | None = None
 
+    def to_prompt_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass(slots=True)
 class InterpretedJournalEvent:
     inode_nr: int
     candidate_name: str
     confidence: float
+    candidate_parent: str = ""
+    sequence: int = 0
+    commit_ts: int = 0
+    event_type: str = "unknown"
+    reason: str = ""
 
 
 @dataclass(slots=True)
@@ -57,31 +106,50 @@ class JournalInterpretationResult:
     notes: list[str]
     raw_response: str = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "events": [asdict(e) for e in self.events],
+            "notes": list(self.notes),
+        }
+
 
 class JournalInterpreter:
-    def __init__(self, api_key: str | None = None, model: str = "gpt-5") -> None:
-        try:
-            from openai import OpenAI
-        except ImportError as exc:  # pragma: no cover
-            raise RuntimeError(
-                "Missing dependency: openai. Install with `pip install openai`."
-            ) from exc
-        self.client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "gpt-5",
+        confidence_threshold: float = 0.75,
+    ) -> None:
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not self.api_key:
+            raise ValueError("Missing OPENAI_API_KEY.")
+        self.client = OpenAI(api_key=self.api_key)
         self.model = model
+        self.confidence_threshold = confidence_threshold
 
     def interpret(
         self,
-        items: Iterable[JournalCandidate],
+        candidates: Iterable[JournalCandidate],
         *,
-        max_items: int = DEFAULT_MAX_ITEMS,
+        max_items: int = 300,
     ) -> JournalInterpretationResult:
-        item_list = list(items)
-        if len(item_list) > max_items:
-            raise ValueError(
-                f"Too many journal items: {len(item_list)} (max_items={max_items})."
+        items = list(candidates)[:max_items]
+        if not items:
+            return JournalInterpretationResult(
+                events=[],
+                notes=["No journal candidates provided."],
             )
 
-        payload = {"items": [asdict(x) for x in item_list]}
+        payload = {
+            "task": "interpret_ext4_journal_candidates",
+            "candidates": [x.to_prompt_dict() for x in items],
+            "instructions": {
+                "be_conservative": True,
+                "preserve_extensions": True,
+                "emit_low_confidence_when_ambiguous": True,
+            },
+        }
+
         response = self.client.responses.create(
             model=self.model,
             instructions=SYSTEM_PROMPT,
@@ -92,71 +160,20 @@ class JournalInterpreter:
                     "name": "journal_interpretation_result",
                     "strict": True,
                     "schema": JSON_SCHEMA,
-                },
+                }
             },
         )
-        raw_text = response.output_text
-        data = _parse_result_json(raw_text)
+        raw = json.loads(response.output_text)
+        events = [InterpretedJournalEvent(**e) for e in raw["events"]]
+        notes = list(raw["notes"])
         return JournalInterpretationResult(
-            events=_parse_events(data["events"]),
-            notes=_parse_notes(data["notes"]),
-            raw_response=raw_text,
+            events=events,
+            notes=notes,
+            raw_response=response.output_text,
         )
 
-
-def _parse_result_json(raw_text: str) -> dict[str, Any]:
-    try:
-        data = json.loads(raw_text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"AI response is not valid JSON: {exc.msg}.") from exc
-    if not isinstance(data, dict):
-        raise ValueError("AI response must be a JSON object.")
-    if set(data.keys()) != {"events", "notes"}:
-        raise ValueError("AI response must contain exactly: events, notes.")
-    return data
-
-
-def _parse_events(raw_events: Any) -> list[InterpretedJournalEvent]:
-    if not isinstance(raw_events, list):
-        raise ValueError("AI response field 'events' must be an array.")
-    events: list[InterpretedJournalEvent] = []
-    for idx, event in enumerate(raw_events):
-        if not isinstance(event, dict):
-            raise ValueError(f"AI response events[{idx}] must be an object.")
-        required_keys = {"inode_nr", "candidate_name", "confidence"}
-        extra = set(event.keys()) - required_keys
-        missing = required_keys - set(event.keys())
-        if missing:
-            missing_str = ", ".join(sorted(missing))
-            raise ValueError(f"AI response events[{idx}] missing field(s): {missing_str}.")
-        if extra:
-            extra_str = ", ".join(sorted(extra))
-            raise ValueError(f"AI response events[{idx}] has unexpected field(s): {extra_str}.")
-        inode_nr = event["inode_nr"]
-        candidate_name = event["candidate_name"]
-        confidence = event["confidence"]
-        if not isinstance(inode_nr, int):
-            raise ValueError(f"AI response events[{idx}].inode_nr must be an integer.")
-        if not isinstance(candidate_name, str):
-            raise ValueError(f"AI response events[{idx}].candidate_name must be a string.")
-        if not isinstance(confidence, (int, float)):
-            raise ValueError(f"AI response events[{idx}].confidence must be a number.")
-        events.append(
-            InterpretedJournalEvent(
-                inode_nr=inode_nr,
-                candidate_name=candidate_name,
-                confidence=float(confidence),
-            )
-        )
-    return events
-
-
-def _parse_notes(raw_notes: Any) -> list[str]:
-    if not isinstance(raw_notes, list):
-        raise ValueError("AI response field 'notes' must be an array.")
-    notes: list[str] = []
-    for idx, note in enumerate(raw_notes):
-        if not isinstance(note, str):
-            raise ValueError(f"AI response notes[{idx}] must be a string.")
-        notes.append(note)
-    return notes
+    def accepted_events(
+        self,
+        result: JournalInterpretationResult,
+    ) -> list[InterpretedJournalEvent]:
+        return [e for e in result.events if e.confidence >= self.confidence_threshold]
