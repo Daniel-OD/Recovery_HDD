@@ -409,11 +409,20 @@ def _cmd_ai_journal(args: argparse.Namespace) -> None:
 
     threshold = getattr(args, "threshold", 0.75)
     try:
-        interpreter = JournalInterpreter(
-            model=args.model,
-            confidence_threshold=threshold,
-        )
-        result = interpreter.interpret(candidates, max_items=300)
+        try:
+            interpreter = JournalInterpreter(
+                model=args.model,
+                confidence_threshold=threshold,
+            )
+        except TypeError:
+            # Backward-compatible constructor signature for test doubles / older impl.
+            interpreter = JournalInterpreter(model=args.model)
+        try:
+            result = interpreter.interpret(candidates, max_items=300)
+        except TypeError:
+            # Backward-compatible method signature for test doubles / older impl.
+            result = interpreter.interpret(candidates)
+
         if getattr(args, "debug", False):
             print(f"Raw AI response: {getattr(result, 'raw_response', '')}")
         payload = (
@@ -426,29 +435,6 @@ def _cmd_ai_journal(args: argparse.Namespace) -> None:
         )
         with open(args.output_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
-    except TypeError:
-        # Backward-compatible constructor signature for test doubles / older impl.
-        try:
-            interpreter = JournalInterpreter(model=args.model)
-            result = interpreter.interpret(candidates, max_items=300)
-            if getattr(args, "debug", False):
-                print(f"Raw AI response: {getattr(result, 'raw_response', '')}")
-            payload = (
-                result.to_dict()
-                if hasattr(result, "to_dict")
-                else {
-                    "events": [asdict(e) for e in result.events],
-                    "notes": list(result.notes),
-                }
-            )
-            with open(args.output_json, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
-        except PermissionError:
-            _print_err(f"Permission denied writing output: {args.output_json}")
-            sys.exit(1)
-        except ValueError as exc:
-            _print_err(f"AI journal interpretation error: {exc}")
-            sys.exit(1)
     except PermissionError:
         _print_err(f"Permission denied writing output: {args.output_json}")
         sys.exit(1)
@@ -484,18 +470,11 @@ def _cmd_ai_report(args: argparse.Namespace) -> None:
 
     try:
         ai = ReportAI(model=args.model)
-        result = ai.summarize(report_data, max_items=300)
-    except TypeError:
-        # Backward-compatible summarize signature for test doubles / older impl.
         try:
-            ai = ReportAI(model=args.model)
+            result = ai.summarize(report_data, max_items=300)
+        except TypeError:
+            # Backward-compatible method signature for test doubles / older impl.
             result = ai.summarize(report_data)
-        except PermissionError:
-            _print_err(f"Permission denied writing output: {args.output_json}")
-            sys.exit(1)
-        except ValueError as exc:
-            _print_err(f"AI report summarization error: {exc}")
-            sys.exit(1)
     except PermissionError:
         _print_err(f"Permission denied writing output: {args.output_json}")
         sys.exit(1)
