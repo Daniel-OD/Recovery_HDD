@@ -9,6 +9,8 @@ recover-named  Filesystem-aware recovery: exports named files and orphans.
 carve          Fallback file carving pipeline.
 report         Generate an HTML report from a completed recovery session.
 ai-orphans     Generate AI suggestions for orphan organization from JSON input.
+ai-journal     Interpret ext4 journal candidate events from JSON input.
+ai-report      Generate AI summary from report/session JSON input.
 
 All commands are read-only; the source disk/image is never modified.
 """
@@ -103,6 +105,36 @@ def main() -> None:
         help="Confidence threshold for accepted suggestions (default: 0.80).",
     )
 
+    # ai-journal
+    p_ai_journal = sub.add_parser(
+        "ai-journal",
+        help="AI interpretation for journal candidates (JSON in/out).",
+    )
+    p_ai_journal.add_argument(
+        "input_json",
+        help="Input JSON containing a 'candidates' list.",
+    )
+    p_ai_journal.add_argument(
+        "output_json",
+        help="Output JSON with interpreted journal events.",
+    )
+    p_ai_journal.add_argument("--model", default="gpt-5", help="OpenAI model name.")
+    p_ai_journal.add_argument(
+        "--threshold",
+        type=float,
+        default=0.75,
+        help="Confidence threshold for accepted events (default: 0.75).",
+    )
+
+    # ai-report
+    p_ai_report = sub.add_parser(
+        "ai-report",
+        help="AI summary for recovery report/session data (JSON in/out).",
+    )
+    p_ai_report.add_argument("input_json", help="Input JSON with report/session data.")
+    p_ai_report.add_argument("output_json", help="Output JSON with AI summary.")
+    p_ai_report.add_argument("--model", default="gpt-5", help="OpenAI model name.")
+
     args = parser.parse_args()
 
     if args.cmd is None:
@@ -132,6 +164,10 @@ def _dispatch(args: argparse.Namespace) -> None:
         _cmd_report(args)
     elif args.cmd == "ai-orphans":
         _cmd_ai_orphans(args)
+    elif args.cmd == "ai-journal":
+        _cmd_ai_journal(args)
+    elif args.cmd == "ai-report":
+        _cmd_ai_report(args)
 
 
 # ── detect-fs ─────────────────────────────────────────────────────────────────
@@ -314,3 +350,79 @@ def _cmd_ai_orphans(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     _print(f"AI orphan suggestions written to: {args.output_json}")
+
+
+# ── ai-journal ─────────────────────────────────────────────────────────────────
+
+def _cmd_ai_journal(args: argparse.Namespace) -> None:
+    from .ai import JournalCandidate, JournalInterpreter
+
+    try:
+        with open(args.input_json, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        _print_err(f"File not found: {args.input_json}")
+        sys.exit(1)
+    except PermissionError:
+        _print_err(f"Permission denied: {args.input_json}")
+        sys.exit(1)
+    except json.JSONDecodeError as exc:
+        _print_err(f"Invalid JSON in input file: {exc}")
+        sys.exit(1)
+
+    try:
+        raw_candidates = data["candidates"]
+        candidates = [JournalCandidate(**item) for item in raw_candidates]
+    except (KeyError, TypeError, ValueError) as exc:
+        _print_err(f"Invalid journal input format: {exc}")
+        sys.exit(1)
+
+    try:
+        interpreter = JournalInterpreter(
+            model=args.model,
+            confidence_threshold=args.threshold,
+        )
+        result = interpreter.interpret(candidates)
+        with open(args.output_json, "w", encoding="utf-8") as f:
+            json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
+    except PermissionError:
+        _print_err(f"Permission denied writing output: {args.output_json}")
+        sys.exit(1)
+    except ValueError as exc:
+        _print_err(f"AI journal interpretation error: {exc}")
+        sys.exit(1)
+
+    _print(f"AI journal suggestions written to: {args.output_json}")
+
+
+# ── ai-report ──────────────────────────────────────────────────────────────────
+
+def _cmd_ai_report(args: argparse.Namespace) -> None:
+    from .ai import ReportAI
+
+    try:
+        with open(args.input_json, "r", encoding="utf-8") as f:
+            report_data = json.load(f)
+    except FileNotFoundError:
+        _print_err(f"File not found: {args.input_json}")
+        sys.exit(1)
+    except PermissionError:
+        _print_err(f"Permission denied: {args.input_json}")
+        sys.exit(1)
+    except json.JSONDecodeError as exc:
+        _print_err(f"Invalid JSON in input file: {exc}")
+        sys.exit(1)
+
+    try:
+        ai = ReportAI(model=args.model)
+        result = ai.summarize(report_data)
+        with open(args.output_json, "w", encoding="utf-8") as f:
+            json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
+    except PermissionError:
+        _print_err(f"Permission denied writing output: {args.output_json}")
+        sys.exit(1)
+    except ValueError as exc:
+        _print_err(f"AI report summarization error: {exc}")
+        sys.exit(1)
+
+    _print(f"AI report summary written to: {args.output_json}")
