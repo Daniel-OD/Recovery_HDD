@@ -63,7 +63,8 @@ class ReportAISummary:
     highlights: list[str]
     warnings: list[str]
     next_steps: list[str]
-    operator_notes: str
+    operator_notes: str | list[str]
+    raw_response: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -81,7 +82,17 @@ class ReportAI:
         self.client = OpenAI(api_key=self.api_key)
         self.model = model
 
-    def summarize(self, report_data: dict[str, Any]) -> ReportAISummary:
+    def summarize(
+        self,
+        report_data: dict[str, Any],
+        *,
+        max_items: int = 300,
+    ) -> ReportAISummary:
+        for key, value in report_data.items():
+            if isinstance(value, list) and len(value) > max_items:
+                raise ValueError(
+                    f"Input list '{key}' has {len(value)} items (max_items={max_items})."
+                )
         payload = {
             "task": "summarize_recovery_report",
             "report_data": report_data,
@@ -105,4 +116,4 @@ class ReportAI:
             },
         )
         raw = json.loads(response.output_text)
-        return ReportAISummary(**raw)
+        return ReportAISummary(**raw, raw_response=response.output_text)

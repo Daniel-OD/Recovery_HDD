@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import asdict
 
 # ── Optional rich output (graceful fallback to plain text) ────────────────────
 try:
@@ -125,6 +126,11 @@ def main() -> None:
         default=0.75,
         help="Confidence threshold for accepted events (default: 0.75).",
     )
+    p_ai_journal.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print raw AI response for debugging.",
+    )
 
     # ai-report
     p_ai_report = sub.add_parser(
@@ -134,6 +140,11 @@ def main() -> None:
     p_ai_report.add_argument("input_json", help="Input JSON with report/session data.")
     p_ai_report.add_argument("output_json", help="Output JSON with AI summary.")
     p_ai_report.add_argument("--model", default="gpt-5", help="OpenAI model name.")
+    p_ai_report.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print raw AI response for debugging.",
+    )
 
     args = parser.parse_args()
 
@@ -370,21 +381,74 @@ def _cmd_ai_journal(args: argparse.Namespace) -> None:
         _print_err(f"Invalid JSON in input file: {exc}")
         sys.exit(1)
 
-    try:
-        raw_candidates = data["candidates"]
-        candidates = [JournalCandidate(**item) for item in raw_candidates]
-    except (KeyError, TypeError, ValueError) as exc:
-        _print_err(f"Invalid journal input format: {exc}")
+    raw_candidates = data.get("candidates")
+    if raw_candidates is None:
+        raw_candidates = data.get("items")
+    if not isinstance(raw_candidates, list):
+        _print_err("Invalid journal input format: expected 'candidates' or 'items' list.")
+        sys.exit(1)
+    if len(raw_candidates) > 300:
+        _print_err("Invalid journal input format: too many journal items (max 300).")
         sys.exit(1)
 
+    candidates: list[JournalCandidate] = []
+    for idx, item in enumerate(raw_candidates):
+        if not isinstance(item, dict):
+            _print_err(f"journal item[{idx}] invalid mapping: expected object")
+            sys.exit(1)
+        if "inode_nr" not in item:
+            _print_err(
+                f"journal item[{idx}] invalid mapping: missing required field(s): inode_nr"
+            )
+            sys.exit(1)
+        try:
+            candidates.append(JournalCandidate(**item))
+        except (TypeError, ValueError) as exc:
+            _print_err(f"journal item[{idx}] invalid mapping: {exc}")
+            sys.exit(1)
+
+    threshold = getattr(args, "threshold", 0.75)
     try:
         interpreter = JournalInterpreter(
             model=args.model,
-            confidence_threshold=args.threshold,
+            confidence_threshold=threshold,
         )
-        result = interpreter.interpret(candidates)
+        result = interpreter.interpret(candidates, max_items=300)
+        if getattr(args, "debug", False):
+            print(f"Raw AI response: {getattr(result, 'raw_response', '')}")
+        payload = (
+            result.to_dict()
+            if hasattr(result, "to_dict")
+            else {
+                "events": [asdict(e) for e in result.events],
+                "notes": list(result.notes),
+            }
+        )
         with open(args.output_json, "w", encoding="utf-8") as f:
-            json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except TypeError:
+        # Backward-compatible constructor signature for test doubles / older impl.
+        try:
+            interpreter = JournalInterpreter(model=args.model)
+            result = interpreter.interpret(candidates, max_items=300)
+            if getattr(args, "debug", False):
+                print(f"Raw AI response: {getattr(result, 'raw_response', '')}")
+            payload = (
+                result.to_dict()
+                if hasattr(result, "to_dict")
+                else {
+                    "events": [asdict(e) for e in result.events],
+                    "notes": list(result.notes),
+                }
+            )
+            with open(args.output_json, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+        except PermissionError:
+            _print_err(f"Permission denied writing output: {args.output_json}")
+            sys.exit(1)
+        except ValueError as exc:
+            _print_err(f"AI journal interpretation error: {exc}")
+            sys.exit(1)
     except PermissionError:
         _print_err(f"Permission denied writing output: {args.output_json}")
         sys.exit(1)
@@ -413,16 +477,51 @@ def _cmd_ai_report(args: argparse.Namespace) -> None:
         _print_err(f"Invalid JSON in input file: {exc}")
         sys.exit(1)
 
+    for key, value in report_data.items():
+        if isinstance(value, list) and len(value) > 300:
+            _print_err(f"Invalid report input format: input list '{key}' exceeds 300 items.")
+            sys.exit(1)
+
     try:
         ai = ReportAI(model=args.model)
-        result = ai.summarize(report_data)
-        with open(args.output_json, "w", encoding="utf-8") as f:
-            json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
+        result = ai.summarize(report_data, max_items=300)
+    except TypeError:
+        # Backward-compatible summarize signature for test doubles / older impl.
+        try:
+            ai = ReportAI(model=args.model)
+            result = ai.summarize(report_data)
+        except PermissionError:
+            _print_err(f"Permission denied writing output: {args.output_json}")
+            sys.exit(1)
+        except ValueError as exc:
+            _print_err(f"AI report summarization error: {exc}")
+            sys.exit(1)
     except PermissionError:
         _print_err(f"Permission denied writing output: {args.output_json}")
         sys.exit(1)
     except ValueError as exc:
         _print_err(f"AI report summarization error: {exc}")
+        sys.exit(1)
+
+    if getattr(args, "debug", False):
+        print(f"Raw AI response: {getattr(result, 'raw_response', '')}")
+
+    payload = (
+        result.to_dict()
+        if hasattr(result, "to_dict")
+        else {
+            "executive_summary": result.executive_summary,
+            "highlights": list(result.highlights),
+            "warnings": list(result.warnings),
+            "next_steps": list(result.next_steps),
+            "operator_notes": result.operator_notes,
+        }
+    )
+    try:
+        with open(args.output_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except PermissionError:
+        _print_err(f"Permission denied writing output: {args.output_json}")
         sys.exit(1)
 
     _print(f"AI report summary written to: {args.output_json}")

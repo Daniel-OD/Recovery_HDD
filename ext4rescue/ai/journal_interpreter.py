@@ -92,18 +92,19 @@ class JournalCandidate:
 class InterpretedJournalEvent:
     inode_nr: int
     candidate_name: str
-    candidate_parent: str
-    sequence: int
-    commit_ts: int
-    event_type: str
     confidence: float
-    reason: str
+    candidate_parent: str = ""
+    sequence: int = 0
+    commit_ts: int = 0
+    event_type: str = "unknown"
+    reason: str = ""
 
 
 @dataclass(slots=True)
 class JournalInterpretationResult:
     events: list[InterpretedJournalEvent]
     notes: list[str]
+    raw_response: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -165,7 +166,11 @@ class JournalInterpreter:
         raw = json.loads(response.output_text)
         events = [InterpretedJournalEvent(**e) for e in raw["events"]]
         notes = list(raw["notes"])
-        return JournalInterpretationResult(events=events, notes=notes)
+        return JournalInterpretationResult(
+            events=events,
+            notes=notes,
+            raw_response=response.output_text,
+        )
 
     def accepted_events(
         self,
