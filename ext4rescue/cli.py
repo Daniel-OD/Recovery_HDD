@@ -21,7 +21,8 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import asdict
+from dataclasses import MISSING, asdict, fields
+from typing import Any
 
 # ── Optional rich output (graceful fallback to plain text) ────────────────────
 try:
@@ -43,6 +44,9 @@ def _print(msg: str) -> None:
 
 def _print_err(msg: str) -> None:
     print(f"[error] {msg}", file=sys.stderr)
+
+
+AI_MAX_ITEMS = 300
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -120,6 +124,11 @@ def main() -> None:
         help="Output JSON with AI journal interpretation.",
     )
     p_ai_journal.add_argument("--model", default="gpt-5", help="OpenAI model name.")
+    p_ai_journal.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print raw AI response before writing output JSON.",
+    )
 
     # ai-report
     p_ai_report = sub.add_parser(
@@ -129,6 +138,11 @@ def main() -> None:
     p_ai_report.add_argument("input_json", help="Input report JSON.")
     p_ai_report.add_argument("output_json", help="Output JSON with AI summary.")
     p_ai_report.add_argument("--model", default="gpt-5", help="OpenAI model name.")
+    p_ai_report.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print raw AI response before writing output JSON.",
+    )
 
     args = parser.parse_args()
 
@@ -364,19 +378,28 @@ def _cmd_ai_journal(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     try:
-        raw_items = data["items"]
-        items = [JournalCandidate(**item) for item in raw_items]
-    except (KeyError, TypeError, ValueError) as exc:
+        _validate_input_object(data, "journal input")
+        raw_items = _validate_input_items(
+            data,
+            key="items",
+            label="journal items",
+            max_items=AI_MAX_ITEMS,
+        )
+        items = _map_dataclass_list(raw_items, JournalCandidate, "journal item")
+    except ValueError as exc:
         _print_err(f"Invalid journal input format: {exc}")
         sys.exit(1)
 
     try:
         interpreter = JournalInterpreter(model=args.model)
-        result = interpreter.interpret(items)
+        result = interpreter.interpret(items, max_items=AI_MAX_ITEMS)
         payload = {
             "events": [asdict(event) for event in result.events],
             "notes": list(result.notes),
         }
+        _validate_journal_output_payload(payload)
+        if getattr(args, "debug", False):
+            _print(f"Raw AI response:\n{result.raw_response}")
         with open(args.output_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
     except PermissionError:
@@ -408,14 +431,21 @@ def _cmd_ai_report(args: argparse.Namespace) -> None:
         _print_err(f"Invalid JSON in input file: {exc}")
         sys.exit(1)
 
-    if not isinstance(data, dict):
-        _print_err("Invalid report input format: expected top-level JSON object.")
-        sys.exit(1)
-
     try:
+        _validate_input_object(data, "report input")
+        _validate_report_input(data, max_items=AI_MAX_ITEMS)
         summarizer = ReportAI(model=args.model)
-        result = summarizer.summarize(data)
-        payload = {"executive_summary": result.executive_summary}
+        result = summarizer.summarize(data, max_items=AI_MAX_ITEMS)
+        payload = {
+            "executive_summary": result.executive_summary,
+            "highlights": list(result.highlights),
+            "warnings": list(result.warnings),
+            "next_steps": list(result.next_steps),
+            "operator_notes": list(result.operator_notes),
+        }
+        _validate_report_output_payload(payload)
+        if getattr(args, "debug", False):
+            _print(f"Raw AI response:\n{result.raw_response}")
         with open(args.output_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
     except PermissionError:
@@ -429,3 +459,106 @@ def _cmd_ai_report(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     _print(f"AI report summary written to: {args.output_json}")
+
+
+def _validate_input_object(data: Any, label: str) -> None:
+    if not isinstance(data, dict):
+        raise ValueError(f"{label} must be a top-level JSON object.")
+
+
+def _validate_input_items(
+    data: dict[str, Any],
+    *,
+    key: str,
+    label: str,
+    max_items: int,
+) -> list[Any]:
+    if key not in data:
+        raise ValueError(f"Missing required field '{key}'.")
+    raw_items = data[key]
+    if not isinstance(raw_items, list):
+        raise ValueError(f"Field '{key}' must be a JSON array.")
+    if len(raw_items) > max_items:
+        raise ValueError(f"{label} count {len(raw_items)} exceeds max_items={max_items}.")
+    return raw_items
+
+
+def _map_dataclass_list(
+    raw_items: list[Any],
+    cls: type[Any],
+    label: str,
+) -> list[Any]:
+    mapped: list[Any] = []
+    cls_fields = {f.name: f for f in fields(cls)}
+    required_fields = {
+        name
+        for name, f in cls_fields.items()
+        if f.default is MISSING and f.default_factory is MISSING
+    }
+    allowed_fields = set(cls_fields.keys())
+
+    for idx, item in enumerate(raw_items):
+        if not isinstance(item, dict):
+            raise ValueError(f"{label}[{idx}] must be an object.")
+        missing = sorted(required_fields - set(item.keys()))
+        extra = sorted(set(item.keys()) - allowed_fields)
+        if missing or extra:
+            chunks: list[str] = []
+            if missing:
+                chunks.append(f"missing required field(s): {', '.join(missing)}")
+            if extra:
+                chunks.append(f"unexpected field(s): {', '.join(extra)}")
+            raise ValueError(f"{label}[{idx}] invalid mapping ({'; '.join(chunks)}).")
+        try:
+            mapped.append(cls(**item))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label}[{idx}] could not be mapped: {exc}") from exc
+    return mapped
+
+
+def _validate_report_input(data: dict[str, Any], *, max_items: int) -> None:
+    for key, value in data.items():
+        if isinstance(value, list) and len(value) > max_items:
+            raise ValueError(f"Input list '{key}' has {len(value)} items (max_items={max_items}).")
+
+
+def _validate_journal_output_payload(payload: dict[str, Any]) -> None:
+    if set(payload.keys()) != {"events", "notes"}:
+        raise ValueError("Journal output must contain exactly: events, notes.")
+    if not isinstance(payload["events"], list):
+        raise ValueError("Journal output field 'events' must be an array.")
+    if not isinstance(payload["notes"], list):
+        raise ValueError("Journal output field 'notes' must be an array.")
+    for idx, event in enumerate(payload["events"]):
+        if not isinstance(event, dict):
+            raise ValueError(f"Journal output events[{idx}] must be an object.")
+        if set(event.keys()) != {"inode_nr", "candidate_name", "confidence"}:
+            raise ValueError(
+                f"Journal output events[{idx}] must contain exactly: inode_nr, candidate_name, confidence."
+            )
+        if not isinstance(event["inode_nr"], int):
+            raise ValueError(f"Journal output events[{idx}].inode_nr must be an integer.")
+        if not isinstance(event["candidate_name"], str):
+            raise ValueError(f"Journal output events[{idx}].candidate_name must be a string.")
+        if not isinstance(event["confidence"], (int, float)):
+            raise ValueError(f"Journal output events[{idx}].confidence must be a number.")
+    for idx, note in enumerate(payload["notes"]):
+        if not isinstance(note, str):
+            raise ValueError(f"Journal output notes[{idx}] must be a string.")
+
+
+def _validate_report_output_payload(payload: dict[str, Any]) -> None:
+    expected = {"executive_summary", "highlights", "warnings", "next_steps", "operator_notes"}
+    if set(payload.keys()) != expected:
+        raise ValueError(
+            "Report output must contain exactly: executive_summary, highlights, warnings, next_steps, operator_notes."
+        )
+    if not isinstance(payload["executive_summary"], str):
+        raise ValueError("Report output field 'executive_summary' must be a string.")
+    for key in ("highlights", "warnings", "next_steps", "operator_notes"):
+        value = payload[key]
+        if not isinstance(value, list):
+            raise ValueError(f"Report output field '{key}' must be an array.")
+        for idx, item in enumerate(value):
+            if not isinstance(item, str):
+                raise ValueError(f"Report output {key}[{idx}] must be a string.")
