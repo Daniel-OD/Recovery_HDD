@@ -2,7 +2,6 @@
 from __future__ import annotations
 import json, os
 from dataclasses import dataclass
-from openai import OpenAI
 
 @dataclass
 class ReportAISummary:
@@ -10,6 +9,12 @@ class ReportAISummary:
 
 class ReportAI:
     def __init__(self,api_key=None,model="gpt-5"):
+        try:
+            from openai import OpenAI
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "Missing dependency: openai. Install with `pip install openai`."
+            ) from exc
         self.client=OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
         self.model=model
 
