@@ -21,17 +21,27 @@ JSON_SCHEMA: dict[str, Any] = {
                     "confidence": {"type": "number"},
                 },
                 "required": ["inode_nr", "candidate_name", "confidence"],
+                "additionalProperties": False,
             },
         },
         "notes": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["events", "notes"],
+    "additionalProperties": False,
 }
 
 
 @dataclass(slots=True)
 class JournalCandidate:
     inode_nr: int
+    raw_name: str | None = None
+    raw_parent: str | None = None
+    sequence: int | None = None
+    commit_ts: int | None = None
+    source_block: int | None = None
+    dirent_offset: int | None = None
+    record_type: str | None = None
+    confidence_hint: float | None = None
 
 
 @dataclass(slots=True)
