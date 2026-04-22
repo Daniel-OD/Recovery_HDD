@@ -38,8 +38,8 @@ class JournalInterpreter:
             raise RuntimeError(
                 "Missing dependency: openai. Install with `pip install openai`."
             ) from exc
-        self.client=OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
-        self.model=model
+        self.client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+        self.model = model
 
     def interpret(self, items:Iterable[JournalCandidate]):
         payload={"items":[asdict(x) for x in items]}
