@@ -5,6 +5,12 @@ from .orphan_rebuilder import (
     OrphanRecord,
     OrphanRebuilder,
 )
+from .journal_interpreter import (
+    JournalCandidate,
+    JournalInterpretationResult,
+    JournalInterpreter,
+)
+from .report_ai import ReportAI, ReportAISummary
 
 __all__ = [
     "AISuggestedFile",
@@ -12,4 +18,9 @@ __all__ = [
     "OrphanRebuildResult",
     "OrphanRecord",
     "OrphanRebuilder",
+    "JournalCandidate",
+    "JournalInterpretationResult",
+    "JournalInterpreter",
+    "ReportAI",
+    "ReportAISummary",
 ]
